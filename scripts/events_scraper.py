@@ -32,34 +32,35 @@ EVENT_INDEX_YEARS = [2012]
 # Translate field labels used in original report to internal names.
 # All fields are parsed and stored as strings, unless otherwise noted.
 REPORT_FIELDS = {
-    'URL': 'url',                        # includes URL fragment for event.
-    'Retracted': 'retracted',            # boolean
-    'Event Type': 'type',                # currently only "Power Reactor"
-    'Event Number': 'event_number',      # int
-    'Facility': 'facility',
-    'Region': 'region',                  # not stored
-    'State': 'state',                    # not stored
-    'Unit': 'unit',                      # list of ints
-    'RX Type': 'rx_type',                # not stored
-    'NRC Notified By': 'nrc_notified_by',
-    'HQ OPS Officer': 'hq_ops_officer',
-    'Emergency Class': 'emergency',      # text, though might change
-    '10 CFR Section': 'cfr10_sections',  # list of tuples (section, name)
-    'Notification Date': 'report_date',  # datetime object
-    'Notification Time': 'report_time',  # merged with report_date
-    'Event Date': 'event_date',          # datetime object
-    'Event Time': 'event_time',          # merged with event_date
-    'Last Update Date': 'update_date',   # date object
-    'Person (Organization)': 'people',   # list of tuples (person, organization)
-    'Reactor Status': 'reactor_status',  # list of dicts. see REACTOR_STATUS_FIELDS
-    'SCRAM Code': 'scram',               # text, though might change
-    'RX CRIT': 'critical',               # boolean
-    'Initial PWR': 'initial_power',      # int
-    'Initial RX Mode': 'initial_mode',
-    'Current PWR': 'current_power',      # int
-    'Current RX Mode': 'current_mode',
-    'Subject': 'subject',
-    'Event Text': 'body',                # list of strings, one per paragraph
+    'url': 'url',                        # includes URL fragment for event.
+    'retracted': 'retracted',            # boolean
+    'event type': 'type',                # currently only "Power Reactor"
+    'event number': 'event_number',      # int
+    'facility': 'facility',
+    'region': 'region',                  # not stored
+    'state': 'state',                    # not stored
+    'unit': 'unit',                      # list of ints
+    'rx type': 'rx_type',                # not stored. (appears in html events)
+    'rxtype': 'rx_type',                 # not stored. (appears in text events)
+    'nrc notified by': 'nrc_notified_by',
+    'hq ops officer': 'hq_ops_officer',
+    'emergency class': 'emergency',      # text, though might change
+    '10 cfr section': 'cfr10_sections',  # list of tuples (section, name)
+    'notification date': 'report_date',  # datetime object
+    'notification time': 'report_time',  # merged with report_date
+    'event date': 'event_date',          # datetime object
+    'event time': 'event_time',          # merged with event_date
+    'last update date': 'update_date',   # date object
+    'person (organization)': 'people',   # list of tuples (person, organization)
+    'reactor status': 'reactor_status',  # list of dicts. see REACTOR_STATUS_FIELDS
+    'scram code': 'scram',               # text, though might change
+    'rx crit': 'critical',               # boolean
+    'initial pwr': 'initial_power',      # int
+    'initial rx mode': 'initial_mode',
+    'current pwr': 'current_power',      # int
+    'current rx mode': 'current_mode',
+    'subject': 'subject',
+    'event text': 'body',                # list of strings, one per paragraph
     }
 # Internal column names for the reactor status table.
 REACTOR_STATUS_FIELDS = [
@@ -103,7 +104,7 @@ def fetch_all(urls):
     pages_seen = events_seen = 0
     for url in urls:
         print url
-        events = parse_event_page(url)
+        events = parse_event_page_html(url)
         pages_seen += 1
         events_seen += len(events)
         url_date = url.split('/')[-1].replace('en.html', '')
@@ -146,17 +147,13 @@ def parse_event_digest(url):
         event_pages.append(daily_url)
     return event_pages
 
-def parse_event_page(url):
+def parse_event_page_html(url):
     parsed = parser_open(url)
     events = []
     # Each event entry on the page starts with an anchor named after the event
     # number. Pick out those anchors as a starting point for parsing.
     for anchor in parsed('a', attrs={'name': re.compile(r'^en\d+')}):
-        event = {
-            'url': url + '#' + anchor['name'],
-            'retracted': False,
-            'crawl_time': datetime.datetime.now(TIMEZONES['UTC']),
-        }
+        event = init_event(url + '#' + anchor['name'])
         # First table after the anchors contains various fields of metadata
         # about the event. The table is only use for layout; the actual fields
         # and data are just lines of text.
@@ -180,17 +177,11 @@ def parse_event_page(url):
         event['event_number'] = meta_cells[1].string.replace('Event Number: ', '')
         # Third cell contains lines of text. Most lines have one field, except
         # one line has both region and state.
-        for line in meta_cells[2].stripped_strings:
-            res = re.split(r'(?u):\s*', line, 1)
-            if res[0] in REPORT_FIELDS:
-                event[REPORT_FIELDS[res[0]]] = res[1]
+        parse_event_fields(event, meta_cells[2].stripped_strings)
         res = re.match(r'(\d+)\s+State:\s+(\w+)', event['region'], flags=re.U)
         event['region'], event['state'] = res.groups()
         # Fourth cell also contains lines of text, always one field per line.
-        for line in meta_cells[3].stripped_strings:
-            res = re.split(r'(?u):\s*', line, 1)
-            if res[0] in REPORT_FIELDS:
-                event[REPORT_FIELDS[res[0]]] = res[1]
+        parse_event_fields(event, meta_cells[3].stripped_strings)
         # Fifth cell has two fields. The first ("Emergency Class") is on one
         # line, the second ("10 CFR Section") is split across multiple lines
         # and can list multiple sections.
@@ -206,7 +197,7 @@ def parse_event_page(url):
         people = list(meta_cells[5].stripped_strings)[1:]
         event['people'] = [
             re.match(r'(.+) \(([^)]*)\)', p, re.U).groups() 
-            for p in people]        
+            for p in people]
         # Move to the second table, which has status information about each
         # reactor at the facility for before and after the event.
         rx_table = meta_table.find_next_sibling('table')
@@ -234,6 +225,161 @@ def parse_event_page(url):
         # Done. Record the event.
         events.append(event)
     return events
+    
+def parse_event_page_text(url):
+    parsed = parser_open(url)
+    events = []
+    # The HTML of these pages is only a wrapper around text-based reports,
+    # all contained in a single PRE tag. The reports are in ASCII tables
+    # and wrapped to exactly 80 columns.
+    raw = parsed.find("pre").strings.next()
+    if "Nuclear Regulatory Commission\n\n" in raw:
+        # For some reason reports from 2003 have double newlines. Use the
+        # NRC header to detect this and remove the extra newlines.
+        lines = raw.split("\n\n")
+    else:
+        lines = raw.split("\n")
+    # Start by splitting the blob into individual reports.
+    reports = _text_split_reports(lines)
+    for report in reports:
+        event = init_event(url)
+        # Retracted events will have an extra line at the beginning.
+        # Remove that line if it's present.
+        if 'RETRACTED' in report[0]:
+            event['retracted'] = True
+            report.pop(0)
+        # First line will be a separator, and second line will have the
+        # event type. We only care about Power Reactor events.
+        res = re.match(r'\|([A-Za-z ]+?)\s+\|Event Number:\s*(\d+)', report[1], re.U)
+        event_type, event_num = res.groups()
+        if event_type != 'Power Reactor':
+            continue
+        # It looks like the header region of a report is a fixed number of
+        # lines. Unless this assertion shows otherwise, I'm going to assume
+        # it is for the purpose of parsing.
+        assert 'EVENT TEXT' in report[24]
+        event['type'] = event_type
+        event['event_number'] = event_num
+        # Two of the lines have two fields, so they have to be reparsed.
+        # This covers facility, unit, rxtype, nrc notified by, hq ops officer,
+        # and emergency class.
+        parse_event_fields(event, _text_get_column(report[4:12], 0))
+        res = re.match(r'([A-Za-z ]+?)\s{2,}REGION:\s+(\d+)', event['facility'], flags=re.U)
+        event['facility'], event['region'] = res.groups()
+        res = re.match(r'([][0-9 ]+?)\s{2,}STATE:\s+(\w+)', event['unit'], flags=re.U)
+        event['unit'], event['state'] = res.groups()
+        # Timestamps are in the second column on lines 4-8.
+        parse_event_fields(event, _text_get_column(report[4:9], 1))
+        # Lines 10-16, second column has related people. Skip first line
+        # because it's the header.
+        event['people'] = []
+        for p in _text_get_column(report[11:17], 1):
+            parts = re.split(r'(?u)\s{2,}', p, 1)
+            # If only one column is given (e.g. the person is "FEMA"), then add
+            # a second empty element to the list, since that's what happens in
+            # the html parser.
+            if len(parts) == 1:
+                parts.append(None)
+            event['people'].append(parts)
+        # Lines 12-16, first column has the related CFR10 sections. First
+        # line is header. There's nothing good to split the line on, so
+        # I'm relying on them to be fixed-width fields.
+        event['cfr10_sections'] = [
+            (s[0:25].strip(), s[25:].strip())
+            for s in _text_get_column(report[13:17], 0)]
+        # Lines 20-22 has status information about each affected reactor.
+        event['reactor_status'] = []
+        for row in report[20:23]:
+            # Parse into columns: unit, scram code, rx crit, init pwr,
+            # init rx mode, curr pwr, curr rx mode.
+            res = re.match(r'\|(\d+)\s+([A-Za-z/]+)\s+(\w+)\s+(\d+)\s+([A-Za-z ]+)\s*\|(\d+)\s+([A-Za-z ]+)\s+\|', row, re.U)
+            if res:
+                unit = dict(zip(REACTOR_STATUS_FIELDS, [f.strip() for f in res.groups()]))
+                event['reactor_status'].append(unit)
+        # Event text is line 26 to the end. Need to trim off the edges and
+        # join lines into paragraphs.
+        body = []
+        prev_line = ""
+        for line in report[26:-1]:
+            line = line.strip("| ")
+            if prev_line:
+                body[-1] = body[-1] + " " + line
+            else:
+                body.append(line)
+            prev_line = line
+        # Now that lines are joined into paragraphs, remove the first and
+        # treat it as the subject.
+        event['subject'] = body.pop(0)
+        event['body'] = body
+
+        # All fields have been extracted from the source document, but all data
+        # is a string. Convert fields to other types as appropriate.
+        process_event(event)
+
+        # Done. Record the event.
+        events.append(event)
+    return events
+
+def _text_split_reports(lines):
+    # Scan for event numbers, then backing up a few lines and taking
+    # everything down to the next number or the end of the list.
+    reports = []
+    current = None
+    last_blank = 0
+    for idx, line in enumerate(lines):
+        # Record position of blank line but don't do anything with it.
+        if not line.strip():
+            last_blank = idx
+            continue
+        # Check whether this line is near the start of a new report.
+        if re.match(r'^\|[^|]+\|Event Number:\s*\d+', line, re.U):
+            # The event number appears a few lines farther down than
+            # where we actually want to start capturing, so we both
+            # have to backtrack to get the start of the report and
+            # have to remove the lines from the previous report.
+            if current:
+                back = idx - last_blank - 1
+                del current[back*-1:]
+                # Save the now complete report.
+                reports.append(current)
+            # Start a new current report using the backtracked lines.
+            # The current line will be added below.
+            current = lines[last_blank+1:idx]
+        if current:
+            current.append(line)
+    # Save the last report.
+    if current:
+        reports.append(current)
+    return reports
+
+def _text_get_column(lines, column):
+    """ Extracts a column from a series of lines in a text-based table.
+        Assumes the table is created with "|+-" characters. The column
+        index starts at zero. """
+    result = []
+    for line in lines:
+        cols = re.split(r'\||\+', line.strip('|+'))
+        col = cols[column].strip()
+        # Skip lines that are only row separator.
+        if re.match(r'[^-]', col, re.U):
+            result.append(col)
+    return result
+
+def init_event(url):
+    event = {
+        'url': url,
+        'retracted': False,
+        'crawl_time': datetime.datetime.now(TIMEZONES['UTC']),
+    }
+    return event
+
+def parse_event_fields(event, lines):
+    """ Parse rows of colon-separated key/value pairs and add them to the
+        event dictionary using REPORT_FIELDS to map the names. """
+    for line in lines:
+        res = re.split(r'(?u):\s*', line, 1)
+        if res[0].lower() in REPORT_FIELDS:
+            event[REPORT_FIELDS[res[0].lower()]] = res[1]
 
 def process_event(event):
     event['event_number'] = int(event['event_number'])
@@ -246,7 +392,7 @@ def process_event(event):
     if event['state'] == 'AZ':
         use_dst = False
     del event['region'], event['state'], event['rx_type']
-        
+
     # Parse dates and times to native objects. update_date is easy because
     # there is no time component.
     # TODO usually the body of the report includes an update time that
@@ -267,7 +413,6 @@ def process_event(event):
     # Process Unit field to get a list of reactors numbers involved in this
     # report instead of a string. The raw string is like "[1] [2] [ ]", where
     # the space within empty brackets is actually a non-breaking space (\xa0)
-    # TODO merge this into the reactor status list
     affected = [int(u) for u in re.findall(r'\[(\d+)\]', event['unit'], re.U)]
     del event['unit']
     # Merge list of affected units into reactor status list. Convert various
@@ -323,7 +468,7 @@ def parser_open(url):
             page = urllib2.urlopen('file://' + PAGE_CACHE_BASE + cache_name)
             print "(used cache)"
         except urllib2.URLError as e:
-            stale = true
+            stale = True
     # Fallback to downloading page.
     if stale or not cacheable:
         page = urllib2.urlopen(url)
@@ -341,6 +486,7 @@ def parser_open(url):
     return BeautifulSoup(body, 'html5lib')
 
 def freeze_time(obj):
+    """ Add support for datetime objects to the JSON serializer. """
     if isinstance(obj, datetime.datetime) or isinstance(obj, datetime.date):
         return obj.isoformat()
     return obj
