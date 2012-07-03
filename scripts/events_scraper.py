@@ -104,10 +104,14 @@ def fetch_all(urls):
     pages_seen = events_seen = 0
     for url in urls:
         print url
-        events = parse_event_page_html(url)
+        url_date = url.split('/')[-1].replace('en.html', '')
+        # Magic date: August 15, 2003 is the last day to use text reports.
+        if int(url_date) <= 20030815:
+            events = parse_event_page_text(url)
+        else:
+            events = parse_event_page_html(url)
         pages_seen += 1
         events_seen += len(events)
-        url_date = url.split('/')[-1].replace('en.html', '')
         for event in events:
             name_parts = [PARSED_EVENTS_BASE, str(event['event_number']), '-', url_date, '.json']
             print " > Event %d" % (event['event_number'])
@@ -240,7 +244,7 @@ def parse_event_page_text(url):
     else:
         lines = raw.split("\n")
     # Start by splitting the blob into individual reports.
-    reports = _text_split_reports(lines)
+    reports = _text_split_reports(_text_preprocess(lines))
     for report in reports:
         event = init_event(url)
         # Retracted events will have an extra line at the beginning.
@@ -254,26 +258,32 @@ def parse_event_page_text(url):
         event_type, event_num = res.groups()
         if event_type != 'Power Reactor':
             continue
+        event['type'] = event_type
+        event['event_number'] = event_num
+        # Strip off the starting separator lines (plus the just parsed line)
+        # because the number of lines seems to vary between reports. Removing
+        # them makes the other line numbers more consistent.
+        report.pop(1)
+        while report[0][0] == '+':
+            report.pop(0)
         # It looks like the header region of a report is a fixed number of
         # lines. Unless this assertion shows otherwise, I'm going to assume
         # it is for the purpose of parsing.
-        assert 'EVENT TEXT' in report[24]
-        event['type'] = event_type
-        event['event_number'] = event_num
+        assert 'EVENT TEXT' in report[20]
         # Two of the lines have two fields, so they have to be reparsed.
         # This covers facility, unit, rxtype, nrc notified by, hq ops officer,
         # and emergency class.
-        parse_event_fields(event, _text_get_column(report[4:12], 0))
-        res = re.match(r'([A-Za-z ]+?)\s{2,}REGION:\s+(\d+)', event['facility'], flags=re.U)
+        parse_event_fields(event, _text_get_column(report[0:8], 0))
+        res = re.match(r'([A-Za-z ]+?)\s*REGION:\s+(\d+)', event['facility'], flags=re.U)
         event['facility'], event['region'] = res.groups()
         res = re.match(r'([][0-9 ]+?)\s{2,}STATE:\s+(\w+)', event['unit'], flags=re.U)
         event['unit'], event['state'] = res.groups()
         # Timestamps are in the second column on lines 4-8.
-        parse_event_fields(event, _text_get_column(report[4:9], 1))
+        parse_event_fields(event, _text_get_column(report[0:5], 1))
         # Lines 10-16, second column has related people. Skip first line
         # because it's the header.
         event['people'] = []
-        for p in _text_get_column(report[11:17], 1):
+        for p in _text_get_column(report[7:13], 1):
             parts = re.split(r'(?u)\s{2,}', p, 1)
             # If only one column is given (e.g. the person is "FEMA"), then add
             # a second empty element to the list, since that's what happens in
@@ -286,10 +296,10 @@ def parse_event_page_text(url):
         # I'm relying on them to be fixed-width fields.
         event['cfr10_sections'] = [
             (s[0:25].strip(), s[25:].strip())
-            for s in _text_get_column(report[13:17], 0)]
+            for s in _text_get_column(report[9:13], 0)]
         # Lines 20-22 has status information about each affected reactor.
         event['reactor_status'] = []
-        for row in report[20:23]:
+        for row in report[16:19]:
             # Parse into columns: unit, scram code, rx crit, init pwr,
             # init rx mode, curr pwr, curr rx mode.
             res = re.match(r'\|(\d+)\s+([A-Za-z/]+)\s+(\w+)\s+(\d+)\s+([A-Za-z ]+)\s*\|(\d+)\s+([A-Za-z ]+)\s+\|', row, re.U)
@@ -300,11 +310,11 @@ def parse_event_page_text(url):
         # join lines into paragraphs.
         body = []
         prev_line = ""
-        for line in report[26:-1]:
+        for line in report[22:-1]:
             line = line.strip("| ")
             if prev_line:
                 body[-1] = body[-1] + " " + line
-            else:
+            elif line:
                 body.append(line)
             prev_line = line
         # Now that lines are joined into paragraphs, remove the first and
@@ -319,6 +329,45 @@ def parse_event_page_text(url):
         # Done. Record the event.
         events.append(event)
     return events
+
+def _text_preprocess(lines):
+    """ Cleans up odd formatting in some of the text reports. """
+    idx = 0
+    processed = []
+    while idx < len(lines):
+        cur = lines[idx]
+        try:
+            peek = lines[idx + 1]
+        except IndexError:
+            peek = None
+        new = None
+        # Some pages use a single period or form feed where others would have
+        # a blank line in between reports.
+        if cur == '.' or cur == "\x0C":
+            new = ''
+        # Reports marked as not for distribution sound tantalizing but appear
+        # to be junk. Strip off the lines so they don't confuse the parser.
+        elif 'NOT FOR PUBLIC DISTRIBUTION' in cur:
+            pass
+        # Some pages have incorrect line breaks. What would otherwise be an
+        # 80-column table line gets split across two lines. Detect this by
+        # looking for a short line that starts with a pipe and is followed by
+        # another short line without a starting pipe.
+        elif 1 < len(cur) < 80 and cur[0] == '|' and peek is not None \
+             and ((len(peek) == 1 and peek == '|') \
+                  or (1 < len(peek) < 80 and peek[0] != '|') \
+                 ):
+            # I think the lines always need a space added between them to get 80.
+            assert len(cur) + len(peek) == 79
+            new = cur + ' ' + peek
+            # Advance current line an extra time.
+            idx = idx + 1
+        else:
+            new = cur
+        if new is not None:
+            processed.append(new)
+        idx = idx + 1
+    return processed
 
 def _text_split_reports(lines):
     # Scan for event numbers, then backing up a few lines and taking
