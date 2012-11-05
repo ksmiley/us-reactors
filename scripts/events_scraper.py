@@ -1,11 +1,5 @@
 #!/usr/bin/python
 
-# TODO:
-# parse retraction and update notes out of body, since they seem to be
-#   deleneated fairly consistently. also, use the subject line of those to 
-#   extract a retraction or update time (since the fielded update is only a 
-#   date)
-
 import sys
 import re
 import json
@@ -182,7 +176,7 @@ def parse_event_page_html(url):
         # Third cell contains lines of text. Most lines have one field, except
         # one line has both region and state.
         parse_event_fields(event, meta_cells[2].stripped_strings)
-        res = re.match(r'(\d+)\s+State:\s+(\w+)', event['region'], flags=re.U)
+        res = re.match(r'(\d*)\s*State:\s+(\w+)', event['region'], flags=re.U)
         event['region'], event['state'] = res.groups()
         # Fourth cell also contains lines of text, always one field per line.
         parse_event_fields(event, meta_cells[3].stripped_strings)
@@ -236,7 +230,10 @@ def parse_event_page_text(url):
     # The HTML of these pages is only a wrapper around text-based reports,
     # all contained in a single PRE tag. The reports are in ASCII tables
     # and wrapped to exactly 80 columns.
-    raw = parsed.find("pre").strings.next()
+    body = parsed.find("pre")
+    if not body:
+        return []
+    raw = body.strings.next()
     if "Nuclear Regulatory Commission\n\n" in raw:
         # For some reason reports from 2003 have double newlines. Use the
         # NRC header to detect this and remove the extra newlines.
@@ -274,7 +271,7 @@ def parse_event_page_text(url):
         # This covers facility, unit, rxtype, nrc notified by, hq ops officer,
         # and emergency class.
         parse_event_fields(event, _text_get_column(report[0:8], 0))
-        res = re.match(r'([A-Za-z ]+?)\s*REGION:\s+(\d+)', event['facility'], flags=re.U)
+        res = re.match(r'([-A-Za-z0-9 ]+?)\s*REGION:\s+(\d+)', event['facility'], flags=re.U)
         event['facility'], event['region'] = res.groups()
         res = re.match(r'([][0-9 ]+?)\s{2,}STATE:\s+(\w+)', event['unit'], flags=re.U)
         event['unit'], event['state'] = res.groups()
@@ -444,9 +441,12 @@ def process_event(event):
 
     # Parse dates and times to native objects. update_date is easy because
     # there is no time component.
-    # TODO usually the body of the report includes an update time that
-    #      could probably be parsed out
     event['update_date'] = convert_time(event['update_date'])
+
+    # Save local timezone in case it's needed later to resolve other times.
+    # Default to Eastern if timezone can't be extracted.
+    tz_res = re.search(r'\[(UTC|[ECMP][DS]?T)\]', event['event_time'], flags=re.I|re.U)
+    local_tz = tz_res.group(1) if tz_res else 'EST'
 
     # Event timestamp is given local to the facility location, so timezones
     # have to be considered. The report timestmap is always Eastern timezone
@@ -465,7 +465,7 @@ def process_event(event):
     affected = [int(u) for u in re.findall(r'\[(\d+)\]', event['unit'], re.U)]
     del event['unit']
     # Merge list of affected units into reactor status list. Convert various
-    # numeric fields in the list to ints. The cirticla field appears to be
+    # numeric fields in the list to ints. The "critical" field appears to be
     # a flag, so it's cast to boolean.
     for unit in event['reactor_status']:
         unit['unit'] = int(unit['unit'])
@@ -477,8 +477,42 @@ def process_event(event):
         unit['current_power'] = int(unit['current_power'])
         assert unit['critical'] == 'Y' or unit['critical'] == 'N'
         unit['critical'] = True if unit['critical'] == 'Y' else False
-        
     
+    # Look for updates in body and parse into separate timestamped entries.
+    updates = [{
+        'time': event['event_time'],
+        'header': '',
+        'body': [],
+    }]
+    for graf in event['body']:
+        # The lines introducing updates are almost but not quite consistent.
+        # Usually they start with "* * * " followed by "UPDATE" or "RETRACTION"
+        # but sometimes there are no spaces, or there are more or fewer stars,
+        # or the text is mixed-case, or the text is "RETRACTED", etc.
+        if re.match(r'(\*\s*){2,}(?:ALERT|UPDATE|RETRACT)', graf, flags=re.I|re.U):
+            header = graf.strip('* ')
+            timestamp = None
+            # Try to pull a timestamp from the header line. First look for the
+            # date because it's consistent and almost always uses slashes.
+            date_res = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', header, flags=re.U)
+            # Look for a time. This is always four digits but everything else
+            # varies. Make sure the four digits don't start with a slash since
+            # that's probably a year. Sometimes the timezone is included, 
+            time_res = re.search(r'(?<!/)(\d{2})(\d{2})\s*(UTC|[ECMP][DS]?T)?', header, flags=re.U|re.I)
+            if date_res and time_res:
+                # If no timezone, assume time is local to the facility.
+                timezone = time_res.group(3) if time_res.group(3) else local_tz
+                time_str = time_res.group(1) + ':' + time_res.group(2) + ' ' + timezone
+                timestamp = convert_time(date_res.group(1), time_str, use_dst)
+            updates.append({
+                'time': timestamp,
+                'header': header,
+                'body': [],
+            })
+        else:
+            updates[-1]['body'].append(graf)
+    event['updates'] = updates
+
 def convert_time(date_part, time_part=None, use_dst=True):
     """ Takes a date string and time string in local time and converts 
     to a datetime object in UTC.
@@ -495,6 +529,9 @@ def convert_time(date_part, time_part=None, use_dst=True):
         if not use_dst and 'MST' in time_part:
             time_str = time_str.replace('MST', 'AZMST')
         time_obj = dateutil.parser.parse(time_str, tzinfos=TIMEZONES)
+        # If the time string didn't have a timezone, assign Eastern as default.
+        if not time_obj.tzinfo:
+            time_obj = time_obj.replace(tzinfo=TIMEZONES['EST'])
         return time_obj.astimezone(TIMEZONES['UTC'])
     else:
         time_obj = dateutil.parser.parse(date_part)
