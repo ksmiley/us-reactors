@@ -20,15 +20,14 @@ PAGE_CACHE_BASE = "/Users/keith/scratch/reactors/raw/"
 PARSED_EVENTS_BASE = "/Users/keith/scratch/reactors/events/"
 
 EVENT_INDEX_URL_TMPL = "http://www.nrc.gov/reading-rm/doc-collections/event-status/event/%d/"
+EVENT_DAY_URL_TMPL = "http://www.nrc.gov/reading-rm/doc-collections/event-status/event/%s/%sen.html"
 #EVENT_INDEX_YEARS = range(1999, 2013)
 EVENT_INDEX_YEARS = [2002]
 
-# Days with weird problems that I'm not yet sure how to fix, or might cleanup
-# manually before processing.
-# first four are missing initial pwr column. fifth is missing both power 
-# columns. all should be 0 (based on reactor status).
-# the last one from 2002 is just fucked all to hell
-SKIP_DAYS = (20040923, 20061018, 20081007, 20081006, 20090408, 20021003, 20020426)
+# Days with weird problems that are easier to just fix manually. See the
+# cleanup_notes.md file for what needs to be done to each. Easiest way is to
+# try running once, then modify the cached HTML file and run again.
+SKIP_DAYS = [20040923, 20061018, 20081007, 20081006, 20090408, 20021003, 20020426]
 
 # Translate field labels used in original report to internal names.
 # All fields are parsed and stored as strings, unless otherwise noted.
@@ -95,7 +94,19 @@ TIMEZONES['PDT'] = TIMEZONES['PST']
 
 
 def main(argv=None):
-    fetch_all(gather_page_urls(EVENT_INDEX_YEARS))
+    # Pass individual dates as YYYYMMDD to process only those pages, regardless
+    # of whether they're skipped by the regular loop.
+    if len(argv) > 1:
+        argv.pop(0)
+        urls = []
+        for date in argv:
+            url = EVENT_DAY_URL_TMPL % (date[0:4], date)
+            urls.append(url)
+        del SKIP_DAYS[:]
+        fetch_all(urls)
+    # Default is process everything.
+    else:
+        fetch_all(gather_page_urls(EVENT_INDEX_YEARS))
 
 def fetch_all(urls):
     """ Loops over urls and downloads each page, then parses out individual 
