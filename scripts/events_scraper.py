@@ -21,7 +21,14 @@ PARSED_EVENTS_BASE = "/Users/keith/scratch/reactors/events/"
 
 EVENT_INDEX_URL_TMPL = "http://www.nrc.gov/reading-rm/doc-collections/event-status/event/%d/"
 #EVENT_INDEX_YEARS = range(1999, 2013)
-EVENT_INDEX_YEARS = [2012]
+EVENT_INDEX_YEARS = [2002]
+
+# Days with weird problems that I'm not yet sure how to fix, or might cleanup
+# manually before processing.
+# first four are missing initial pwr column. fifth is missing both power 
+# columns. all should be 0 (based on reactor status).
+# the last one from 2002 is just fucked all to hell
+SKIP_DAYS = (20040923, 20061018, 20081007, 20081006, 20090408, 20021003, 20020426)
 
 # Translate field labels used in original report to internal names.
 # All fields are parsed and stored as strings, unless otherwise noted.
@@ -67,7 +74,7 @@ REACTOR_STATUS_FIELDS = [
 # states because there are no reactors in Alaska or Hawaii. However, there is
 # a reactor in Arizona that requires special handling because the state does not
 # observe daylight saving time. It's the only reactor in the Mountain timezone, 
-# so we could cheat and pretend MDT doesn't exist. Instead though we'll make
+# so we could cheat and pretend MDT doesn't exist. Instead though we'll make a
 # fake timezone abbreviation for the state and handle it in the parser.
 # (Note: If the scope of this code is ever expanded, even this might not be
 # enough of a hack because the Navajo Nation is geographically within AZ and
@@ -99,8 +106,10 @@ def fetch_all(urls):
     for url in urls:
         print url
         url_date = url.split('/')[-1].replace('en.html', '')
+        if int(url_date) in SKIP_DAYS:
+            continue
         # Magic date: August 15, 2003 is the last day to use text reports.
-        if int(url_date) <= 20030815:
+        elif int(url_date) <= 20030815:
             events = parse_event_page_text(url)
         else:
             events = parse_event_page_html(url)
@@ -108,7 +117,7 @@ def fetch_all(urls):
         events_seen += len(events)
         for event in events:
             name_parts = [PARSED_EVENTS_BASE, str(event['event_number']), '-', url_date, '.json']
-            print " > Event %d" % (event['event_number'])
+            #print " > Event %d" % (event['event_number'])
             with open(''.join(name_parts), 'w') as f:
                 json.dump(event, f, indent=4, default=freeze_time)
     print "Done. %d events on %d pages" % (events_seen, pages_seen)
@@ -156,6 +165,8 @@ def parse_event_page_html(url):
         # about the event. The table is only use for layout; the actual fields
         # and data are just lines of text.
         meta_table = anchor.find_next_sibling('table')
+        if not meta_table:
+            continue
         # Table contains three rows with two cells each. Since the table is
         # only for layout, grab all six cells (or seven for a retraction).
         meta_cells = meta_table('td')
@@ -173,6 +184,7 @@ def parse_event_page_html(url):
         # Second cell has the unique number for this event report, and includes
         # a label that needs to be stripped off.
         event['event_number'] = meta_cells[1].string.replace('Event Number: ', '')
+        print " > Event %s" % (event['event_number'])
         # Third cell contains lines of text. Most lines have one field, except
         # one line has both region and state.
         parse_event_fields(event, meta_cells[2].stripped_strings)
@@ -194,7 +206,7 @@ def parse_event_page_html(url):
         # included (e.g. "PART 21 GROUP ()")
         people = list(meta_cells[5].stripped_strings)[1:]
         event['people'] = [
-            re.match(r'(.+) \(([^)]*)\)', p, re.U).groups() 
+            re.match(r'(.*?) ?\(([^)]*)\)', p, re.U).groups() 
             for p in people]
         # Move to the second table, which has status information about each
         # reactor at the facility for before and after the event.
@@ -204,6 +216,7 @@ def parse_event_page_html(url):
         # Skip the header by starting with the second row.
         for row in rx_rows[1:]:
             values = [f.string for f in row('td')]
+            assert len(values) == 7
             unit = dict(zip(REACTOR_STATUS_FIELDS, values))
             event['reactor_status'].append(unit)
 
@@ -225,23 +238,10 @@ def parse_event_page_html(url):
     return events
     
 def parse_event_page_text(url):
-    parsed = parser_open(url)
-    events = []
-    # The HTML of these pages is only a wrapper around text-based reports,
-    # all contained in a single PRE tag. The reports are in ASCII tables
-    # and wrapped to exactly 80 columns.
-    body = parsed.find("pre")
-    if not body:
-        return []
-    raw = body.strings.next()
-    if "Nuclear Regulatory Commission\n\n" in raw:
-        # For some reason reports from 2003 have double newlines. Use the
-        # NRC header to detect this and remove the extra newlines.
-        lines = raw.split("\n\n")
-    else:
-        lines = raw.split("\n")
+    lines = _text_get_lines(url)
     # Start by splitting the blob into individual reports.
     reports = _text_split_reports(_text_preprocess(lines))
+    events = []
     for report in reports:
         event = init_event(url)
         # Retracted events will have an extra line at the beginning.
@@ -257,12 +257,16 @@ def parse_event_page_text(url):
             continue
         event['type'] = event_type
         event['event_number'] = event_num
+        print " > Event %s" % (event['event_number'])
         # Strip off the starting separator lines (plus the just parsed line)
         # because the number of lines seems to vary between reports. Removing
         # them makes the other line numbers more consistent.
         report.pop(1)
         while report[0][0] == '+':
             report.pop(0)
+        # http://www.nrc.gov/reading-rm/doc-collections/event-status/event/2001/20011108en.html
+        if report[0][0:4] == '!!!!':
+            continue
         # It looks like the header region of a report is a fixed number of
         # lines. Unless this assertion shows otherwise, I'm going to assume
         # it is for the purpose of parsing.
@@ -271,7 +275,7 @@ def parse_event_page_text(url):
         # This covers facility, unit, rxtype, nrc notified by, hq ops officer,
         # and emergency class.
         parse_event_fields(event, _text_get_column(report[0:8], 0))
-        res = re.match(r'([-A-Za-z0-9 ]+?)\s*REGION:\s+(\d+)', event['facility'], flags=re.U)
+        res = re.match(r'([-A-Za-z0-9 ()]+?)\s*REGION:\s+(\d+)', event['facility'], flags=re.U)
         event['facility'], event['region'] = res.groups()
         res = re.match(r'([][0-9 ]+?)\s{2,}STATE:\s+(\w+)', event['unit'], flags=re.U)
         event['unit'], event['state'] = res.groups()
@@ -327,6 +331,23 @@ def parse_event_page_text(url):
         events.append(event)
     return events
 
+def _text_get_lines(url):
+    parsed = parser_open(url)
+    # The HTML of these pages is only a wrapper around text-based reports,
+    # all contained in a single PRE tag. The reports are in ASCII tables
+    # and wrapped to exactly 80 columns.
+    body = parsed.find("pre")
+    if not body:
+        return []
+    raw = body.strings.next()
+    if "Nuclear Regulatory Commission\n\n" in raw:
+        # For some reason reports from 2003 have double newlines. Use the
+        # NRC header to detect this and remove the extra newlines.
+        lines = raw.split("\n\n")
+    else:
+        lines = raw.split("\n")
+    return lines
+
 def _text_preprocess(lines):
     """ Cleans up odd formatting in some of the text reports. """
     idx = 0
@@ -342,6 +363,10 @@ def _text_preprocess(lines):
         # a blank line in between reports.
         if cur == '.' or cur == "\x0C":
             new = ''
+        # Extremely special case, where a period has gotten squished on to
+        # another line. e.g. http://www.nrc.gov/reading-rm/doc-collections/event-status/event/2001/20011203en.html
+        elif cur[0:2] == '.+':
+            new = ('', cur[1:])
         # Reports marked as not for distribution sound tantalizing but appear
         # to be junk. Strip off the lines so they don't confuse the parser.
         elif 'NOT FOR PUBLIC DISTRIBUTION' in cur:
@@ -359,10 +384,24 @@ def _text_preprocess(lines):
             new = cur + ' ' + peek
             # Advance current line an extra time.
             idx = idx + 1
+        # Strip short lines that are just ascii art and emptiness.
+        # http://www.nrc.gov/reading-rm/doc-collections/event-status/event/2001/20011016en.html
+        elif 1 < len(cur) < 80 and cur[0] == '|' and cur.strip('| ') == '':
+            pass
+        # Inject a blank line between the list of event numbers in the preamble
+        # and the first event report.
+        # http://www.nrc.gov/reading-rm/doc-collections/event-status/event/2003/20030122en.html
+        elif re.match(r'\d{5}\s*(?:\d{5}\s*)*$', cur) and peek is not None and peek[0:2] == '+-':
+            new = (cur, '')
         else:
             new = cur
         if new is not None:
-            processed.append(new)
+            # If new isn't a string, assume it's an iterable and is injecting 
+            # multiple lines.
+            if isinstance(new, basestring):
+                processed.append(new)
+            else:
+                processed.extend(new)
         idx = idx + 1
     return processed
 
@@ -385,6 +424,14 @@ def _text_split_reports(lines):
             # have to remove the lines from the previous report.
             if current:
                 back = idx - last_blank - 1
+                # Arbitrary limit on how far to go back. If the distance to
+                # the last blank is more than a few lines, then this report has
+                # probably gotten pushed up against another, so just assume
+                # one line back.
+                # http://www.nrc.gov/reading-rm/doc-collections/event-status/event/2001/20011019en.html
+                if back > 5:
+                    back = 1
+                    last_blank = idx - 2
                 del current[back*-1:]
                 # Save the now complete report.
                 reports.append(current)
@@ -497,13 +544,19 @@ def process_event(event):
             date_res = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', header, flags=re.U)
             # Look for a time. This is always four digits but everything else
             # varies. Make sure the four digits don't start with a slash since
-            # that's probably a year. Sometimes the timezone is included, 
+            # that's probably a year. Sometimes the timezone is included.
             time_res = re.search(r'(?<!/)(\d{2})(\d{2})\s*(UTC|[ECMP][DS]?T)?', header, flags=re.U|re.I)
             if date_res and time_res:
                 # If no timezone, assume time is local to the facility.
                 timezone = time_res.group(3) if time_res.group(3) else local_tz
-                time_str = time_res.group(1) + ':' + time_res.group(2) + ' ' + timezone
-                timestamp = convert_time(date_res.group(1), time_str, use_dst)
+                # I can't believe this is needed.
+                hour = '00' if (time_res.group(1) == '24') else time_res.group(1)
+                time_str = hour + ':' + time_res.group(2) + ' ' + timezone
+                date_str = date_res.group(1)
+                # hack for http://www.nrc.gov/reading-rm/doc-collections/event-status/event/2003/20030818en.html
+                if date_str == '89/16/03':
+                    date_str = '8/16/03'
+                timestamp = convert_time(date_str, time_str, use_dst)
             updates.append({
                 'time': timestamp,
                 'header': header,
@@ -560,7 +613,7 @@ def parser_open(url):
         page = urllib2.urlopen(url)
         print "(hit server)"
         # Force delay between requests to take it easy on the server.
-        sleep(0.25)
+        sleep(1)
     body = page.read()
     # Cache event pages.
     if stale and cacheable:
