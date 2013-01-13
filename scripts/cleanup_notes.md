@@ -31,3 +31,15 @@ Run `csvjoin -c 'Docket  Number,docket' data/operating-reactors.csv data/reactor
 Redirect to a final merged file.
 
 Pass that filename as the first argument to the `load_reactors.py` script, which will create facility and reactor records for each input row.
+
+## Event Notifications
+
+Some manual cleanup that's easier than accounting for it in the scraper:
+
+* 20020426: event #38877 has a metadata section that's only 79 columns wide. insert a space near the end of each of those lines (right before the pipe). Also, the hyphens above the first report (#38876) are broken across two lines. Recombine to one line and make sure it's 80 characters.
+* 20021003: Just start over. For some reason this single page is in a completely different text format from every single other page. It'll just have to be entered manually.
+* 20040923: report #41062 is missing the initial power field. Add the column as 0 (same as current power beacuse both are refueling)
+* 20061018: report #42916 is missing the initial power field. Add the column as 0 (same as current power beacuse both are refueling)
+* 20081006: report #44542 is missing the initial power field on the first reactor unit. Add the column as 0 (same as current power because both are cold shutdown)
+* 20081007: same as above
+* 20090408: the last report (#44976) is missing both power fields in the reactor status section. Add both as 0 (it's zero power because the reactor is in cold shutdown)
